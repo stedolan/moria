@@ -1,117 +1,6 @@
-(* 
-Stack types are:
-() - empty stack
-'a * 'stk - stack with 'a on top
-
-how much yoneda?
-I could work with functions, and composition
-this is like cayley's for monoids
-
-dup : ('a * 'stk) dwarf -> ('a * ('a * 'stk)) dwarf
-
-(@) : 'a dwarf -> 
-
-bind : ('stk dwarf -> ('a * 'stk) dwarf) -> (
-
-
-bind c1 (fun x -> add x 5)
-
-(@) : ('stk1, 'stk2) code -> ('stk2, 'stk3) code -> ('stk1, 'stk3) code
-
-under : ('stk, 'a * 'stk) code -> ('b * 'stk, 'a * 'b * 'stk) code
-
-both : ('stk, 'a * 'stk) code -> ('stk, 'b * 'stk) code -> ('stk, 'a * ('b * 'stk)) code
-both f g = f @ under g
-
-add : (int * (int * 'stk), int * 'stk) code
-
-
-bind : ('stk, 'a * 'stk) code -> ('a var -> ('stk, 'stk2) code) -> ('stk, 'stk2) code
-var : 'a var -> ('stk, 'a * 'stk) code
-
- *)
-
-
-(*>
-
-
-add1 :
-  ('stk, int * 'stk) code ->
-  (int * 'stk, int * (int * 'stk)) code ->
-  ('stk, int * 'stk) code 
-
-bind1 :
-  ('stk, 'a * 'stk) code ->
-  ('a var -> ('a * 'stk, 'b * ('a * 'stk)) code) ->
-  ('stk, 'b * 'stk) code
-
-var :
-  'a var -> ('stk, 'a * 'stk) code
-
-bind1 x (fun x -> add x x)
-
-bind2 x (fun x -> var x @ var x) @ add
-
-x; dup; over; rot; rot; drop
-
-
-over; rot;
-[y x] -> [y x y] -> [y y x]
-==
-over; swap
-
-swap; rot
-[z y x] -> [z x y] -> [y z x]
-
-swap; rot; drop
-[z y x] -> [z x y] -> [y z x] -> [y z]
-==
-drop; swap
-
-dup; rot
-[y x] -> [y x x] -> [x y x]
-==
-swap; over
-
-
-over; rot; rot; drop
-==
-over; swap; rot; drop
-==
-over; drop; swap
-==
-swap
-
-over; rot; rot => over; dup; rot => over; swap; over
-
-swap; over
-[y x] -> [x y] -> [x y x]
-
-over; swap; over
-[y x] -> [y x y] -> [y y x] -> 
-
-
-x; pick 0; pick 1; add; swap; drop
-
-pick1 is last use:
-x; pick 0; pick 1
-
-
-
-v: ('stk, int * 'stk) code
-
-add : (int * (int * 'stk), int * 'stk) code
-
-const 1 : ('stk, int * 'stk)
-
-
-lam (fun v -> add (push 1) v) == add (push 1)
-*)
-
-
 type addr = int64
 
-type nullop = Const of Int64.t | Fbreg | Breg of int
+type nullop = Const of Int64.t | Fbreg of Int64.t | Breg of int * Int64.t
 type unop = Abs | Neg | Not | Deref
 type binop = Plus | Minus | Mul | Mod | Div | Shl | Shr | Shra | And | Or | Xor
 
@@ -132,34 +21,91 @@ type (_,_) oplist =
 | (::) : ('stk1, 'stk2) op * ('stk2, 'stk3) oplist ->
          ('stk1, 'stk3) oplist
 
-let emit s = Printf.printf "%s\n" s
+type buffer = {
+    buf : Buffer.t;
+    line_prefix : string;
+    line_max : int;
+    mutable len_since_newline : int
+}
+let emit b s =
+  if b.len_since_newline + String.length s + 4 > b.line_max then begin
+    Buffer.add_string b.buf ", \\\n";
+    b.len_since_newline <- 0
+  end;
+  let sep =
+    if b.len_since_newline > 0 then ", "
+    else b.line_prefix in
+  Buffer.add_string b.buf sep;
+  Buffer.add_string b.buf s;
+  b.len_since_newline <- b.len_since_newline + String.length sep + String.length s
+
+let emit_op b s = emit b ("DW_OP_" ^ s)
+let emit_byte b n = emit b (Printf.sprintf "0x%02x" n)
+let rec emit_leb128 b n =
+  let c = Int64.(logand n (of_int 127) |> to_int) in
+  let n' = Int64.(shift_right_logical n 8) in
+  if n' = Int64.zero then
+    emit_byte b c
+  else
+    (emit_byte b (c lor 128); emit_leb128 b n')
+
 
 let rec int_of_index : type stk a . (stk, a) index -> int = function
   | Top -> 0
   | Below i -> 1 + int_of_index i
 
-let rec assemble : type stk1 stk2 . (stk1, stk2) oplist -> unit = function
+let rec assemble : type stk1 stk2 . buffer -> (stk1, stk2) oplist -> unit =
+  fun b code -> match code with
   | Drop :: code ->
-     emit "DW_OP_dup";
-     assemble code
+     emit_op b "drop";
+     assemble b code
   | Swap :: code ->
-     emit "DW_OP_swap";
-     assemble code
+     emit_op b "swap";
+     assemble b code
   | Pick Top :: code ->
-     emit "DW_OP_dup";
-     assemble code
+     emit_op b "dup";
+     assemble b code
   | Pick (Below Top) :: code ->
-     emit "DW_OP_over";
-     assemble code
+     emit_op b "over";
+     assemble b code
   | Pick i :: code ->
-     emit "DW_OP_pick";
-     emit (string_of_int (int_of_index i));
-     assemble code
+     emit_op b "pick";
+     emit_byte b (int_of_index i);
+     assemble b code
   | Nullop (Const n) :: code when n < Int64.of_int 32 ->
-     emit ("DW_OP_lit" ^ Int64.to_string n)
-  | Nullop (Const _) :: code ->
-     failwith "constants??"
-  | _ -> failwith "bored now"
+     emit_op b ("lit" ^ Int64.to_string n);
+     assemble b code
+  | Nullop (Const n) :: code ->
+     emit_op b "constu";
+     emit_leb128 b n;
+     assemble b code
+  | Nullop _ :: code -> failwith "unimplemented"
+  | Unop op :: code ->
+     let opname = match op with
+       | Abs -> "abs"
+       | Neg -> "neg"
+       | Not -> "not"
+       | Deref -> "deref" in
+     emit_op b opname;
+     assemble b code
+  | Binop op :: code ->
+     let opname = match op with
+       | Plus -> "plus"
+       | Minus -> "minus"
+       | Mul -> "mul"
+       | Mod -> "mod"
+       | Div -> "div"
+       | Shl -> "shl"
+       | Shr -> "shr"
+       | Shra -> "shra"
+       | And -> "and"
+       | Or -> "or"
+       | Xor -> "xor" in
+     emit_op b opname;
+     assemble b code
+  | [] -> ()
+
+
 
 
 type 'a ext = ..
@@ -244,21 +190,59 @@ let rec compile_acc : type stk1 stk2 stk3 .
      Vars ([v], env),
      fun acc -> Pick (pickv env v) :: acc
 
-let compile code = snd (compile_acc Empty code) []
+let compile code =
+  let oplist = snd (compile_acc Empty code) [] in
+  let b = {
+      buf = Buffer.create 100;
+      line_prefix = "\t  ";
+      line_max = 60;
+      len_since_newline = 0
+    } in
+  assemble b oplist;
+  Buffer.contents b.buf
 
-let add = Prim (Binop Plus)
-let dup = Prim (Pick Top)
 
-let const n = Prim (Nullop (Const (Int64.of_int n)))
 
-let (@) c1 c2 = Seq (c2, c1)
 
-let inc x = x @ add @ const 1
+type 's binary_operator =
+  ('s,         's * addr        ) code ->
+  ('s * addr, ('s * addr) * addr) code ->
+  ('s,         's * addr        ) code
 
+type 's unary_operator =
+  ('s,         's * addr        ) code ->
+  ('s,         's * addr        ) code
+
+let (@) c1 c2 = Seq (c1, c2)
+
+let const n = Prim (Nullop (Const n))
+let fbreg = Prim (Nullop (Fbreg Int64.zero))
+let breg n = Prim (Nullop (Breg (n, Int64.zero)))
+
+module Expr = struct
+  let int n = const (Int64.of_int n)
+  let (+) a b = a @ b @ Prim (Binop Plus)
+  let (-) a b = a @ b @ Prim (Binop Minus)
+  let ( * ) a b = a @ b @ Prim (Binop Mul)
+  let (mod) a b = a @ b @ Prim (Binop Mod)
+  let (/) a b = a @ b @ Prim (Binop Div)
+  let (lsl) a b = a @ b @ Prim (Binop Shl)
+  let (asr) a b = a @ b @ Prim (Binop Shra)
+  let (lsr) a b = a @ b @ Prim (Binop Shr)
+  let (land) a b = a @ b @ Prim (Binop And)
+  let (lor) a b = a @ b @ Prim (Binop Or)
+  let (lxor) a b = a @ b @ Prim (Binop Xor)
+  let abs a = a @ Prim (Unop Abs)
+  let (~-) a = a @ Prim (Unop Neg)
+  let lnot a = a @ Prim (Unop Not)
+  let (!) a = a @ Prim (Unop Deref)
+end
+
+
+let var v = Var v
 let lam body =
   let v = fresh () in Lam (v, body v)
+let apply f x = x @ f
+let bind e body = apply (lam body) e
 
-let bind e body = lam body @ e
 
-
-let two = bind (const 1) (fun x -> add @ Var x @ Var x)
